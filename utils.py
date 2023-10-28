@@ -261,6 +261,106 @@ dataset_configs = {
     }
 }
 
+def generate_configs(config_grid):
+    config_list = list(product(*config_grid.values()))
+    config_dicts = []
+    for config_tuple in config_list:
+        config_dict = dict(zip(config_grid.keys(), config_tuple))
+        config_dicts.append(config_dict)
+    return config_dicts
+
+
+
+def compute_beta(act):
+    x = torch.randn(1000000)
+    c0 = act(x).mean()
+    c1 = (act(x)*x).mean()
+    csum2 = (act(x)**2).mean()
+    beta0 = 2 - c1**2 / (csum2 - c0**2)
+    # c0, c1, csum2, beta0
+    return beta0.item()
+
+
+
+# Define the MLP model with layer normalization
+class MLP(nn.Module):
+    def __init__(self, input_size, hidden_sizes, num_classes, activation, normalization, **kwargs):
+        super(MLP, self).__init__()
+        if normalization == 'LN':
+            self.norm = nn.LayerNorm
+        elif normalization == 'BN':
+            self.norm = nn.BatchNorm1d
+        elif normalization == 'None':
+            self.norm = nn.Identity
+        if not isinstance(input_size, int):
+            p = 1
+            for s in input_size:
+                p *= s
+            input_size = p
+
+        self.layers = nn.Sequential()
+        hidden_sizes = [input_size] + hidden_sizes + [num_classes]
+        num_layers = len(hidden_sizes)
+        # self.layers.add_module('fc-0', nn.Linear(input_size, hidden_size))
+        # self.layers.add_module('norm-0', self.norm(hidden_size))
+
+        for i, (h1,h2) in enumerate(zip(hidden_sizes[:-1],hidden_sizes[1:])):
+            self.layers.add_module(f'norm-{i}', self.norm((h1)))
+            self.layers.add_module(f'fc-{i}', nn.Linear(h1, h2))
+            self.layers.add_module(f'act-{i}', getattr(nn, activation)())
+
+        # self.layers.add_module(f'fc-{num_layers - 1}', nn.Linear(hidden_size, num_classes))
+        self.apply(self.init_weights)
+
+    def init_weights(self, layer):
+        if isinstance(layer, nn.Linear):
+            std = 1 / math.sqrt(layer.weight.size(1))
+            nn.init.normal_(layer.weight, mean=0, std=std)
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)        
+        hidden_layers = []
+        for i, (name, layer) in enumerate(self.layers.named_children()):
+            hidden_layers.append((name, x, layer(x)))
+            x = layer(x)
+        output = x
+        return output, hidden_layers
+
+
+def train_model(model, train_loader, criterion, optimizer, clip_norm, device):
+    model.train()
+    for images, labels in train_loader:
+        images = images.to(device)
+        labels = labels.to(device)
+
+        outputs, hidden = model(images)
+        loss = criterion(outputs, labels)
+        optimizer.zero_grad()
+        if clip_norm is not None:
+            for l in model.layers:
+                torch.nn.utils.clip_grad_norm(l.parameters(),max_norm=clip_norm)
+        loss.backward()
+        optimizer.step()
+    return loss
+
+
+def evaluate_model(model, data_loader, criterion, device):
+    model.eval()
+    total = 0
+    correct = 0
+    with torch.no_grad():
+        for images, labels in data_loader:
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs, hidden = model(images)
+            loss = criterion(outputs, labels)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    return correct / total
+
 
 
   
